@@ -87,6 +87,8 @@ mod trace;
 pub use crate::bytes::Bytes;
 pub use crate::bytes_mut::BytesMut;
 
+pub use crate::trace::{BytesCollector, BytesTracer, GLOBAL_TRACER};
+
 // Optional Serde support
 #[cfg(feature = "serde")]
 mod serde;

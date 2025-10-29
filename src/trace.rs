@@ -38,7 +38,7 @@ pub struct RefCountEvent {
 
 pub struct BytesTracer {
     sender: Arc<Sender<RefCountEvent>>,
-    collector: Arc<BytesCollector>,
+    pub collector: Arc<BytesCollector>,
 }
 
 impl BytesTracer {
