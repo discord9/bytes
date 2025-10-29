@@ -16,6 +16,7 @@ use crate::bytes::Vtable;
 #[allow(unused)]
 use crate::loom::sync::atomic::AtomicMut;
 use crate::loom::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use crate::trace::trace_event;
 use crate::{Buf, BufMut, Bytes, TryGetError};
 
 /// A unique reference to a contiguous slice of memory.
@@ -1437,7 +1438,12 @@ impl<'a> FromIterator<&'a u8> for BytesMut {
 
 unsafe fn increment_shared(ptr: *mut Shared) {
     let old_size = (*ptr).ref_count.fetch_add(1, Ordering::Relaxed);
-
+    trace_event(
+        ptr as usize,
+        (*ptr).original_capacity_repr,
+        old_size,
+        crate::trace::RefOp::Inc,
+    );
     if old_size > isize::MAX as usize {
         crate::abort();
     }
@@ -1445,7 +1451,14 @@ unsafe fn increment_shared(ptr: *mut Shared) {
 
 unsafe fn release_shared(ptr: *mut Shared) {
     // `Shared` storage... follow the drop steps from Arc.
-    if (*ptr).ref_count.fetch_sub(1, Ordering::Release) != 1 {
+    let old_cnt = (*ptr).ref_count.fetch_sub(1, Ordering::Release);
+    trace_event(
+        ptr as usize,
+        (*ptr).original_capacity_repr,
+        old_cnt,
+        crate::trace::RefOp::Inc,
+    );
+    if old_cnt != 1 {
         return;
     }
 

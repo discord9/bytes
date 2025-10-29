@@ -67,8 +67,8 @@ impl BytesTracer {
         )
     }
 
-    // Function called by business threads to record events
-    // Use #[inline] to hint the compiler to inline, reducing function call overhead
+    /// Function called by business threads to record events
+    /// Use #[inline] to hint the compiler to inline, reducing function call overhead
     #[inline]
     pub fn record(&self, ptr: usize, cap: usize, old_ref_cnt: usize, op: RefOp) {
         if ptr % SAMPLE_FACTOR != 0 {

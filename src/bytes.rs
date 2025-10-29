@@ -1129,6 +1129,8 @@ unsafe fn owned_clone(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes
     let owned = data.load(Ordering::Relaxed);
     let ref_cnt = &(*owned.cast::<OwnedLifetime>()).ref_cnt;
     let old_cnt = ref_cnt.fetch_add(1, Ordering::Relaxed);
+    // for owned bytes cap==len
+    trace_event(ptr as usize, len, old_cnt, RefOp::Inc);
     if old_cnt > usize::MAX >> 1 {
         crate::abort()
     }
@@ -1161,6 +1163,9 @@ unsafe fn owned_drop_impl(owned: *mut ()) {
     let ref_cnt = &(*lifetime).ref_cnt;
 
     let old_cnt = ref_cnt.fetch_sub(1, Ordering::Release);
+    // FIXME: cap = 0? or what i don't know
+    trace_event(owned as usize, 0, old_cnt, RefOp::Dec);
+
     debug_assert!(
         old_cnt > 0 && old_cnt <= usize::MAX >> 1,
         "expected non-zero refcount and no underflow"
