@@ -1,22 +1,21 @@
 use backtrace::Backtrace;
-use core::{cell::OnceCell, hash::Hash, str::FromStr};
+use core::hash::Hash;
 use crossbeam_channel::{unbounded, Sender};
-use quanta::Instant;
+use inferno::flamegraph::{self, Options};
 use std::{
     collections::HashMap,
-    dbg,
-    string::String,
+    format,
+    fs::File,
+    string::{String, ToString as _},
     sync::{Arc, Mutex, OnceLock},
     thread,
     vec::Vec,
 };
 
-use crate::Bytes;
-
 /// Only sample when address % 997 == 0
 const SAMPLE_FACTOR: usize = 997;
 /// Defines the operation type
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum RefOp {
     /// Increment reference (clone)
     Inc,
@@ -134,6 +133,41 @@ impl BytesCollector {
         let states = self.ptr_states.lock().unwrap();
         (*states).clone()
     }
+
+    pub fn render_flamegraph(&self, output_file: &str) {
+        let mut states = self.ptr_states.lock().unwrap();
+        let mut stacks = Vec::new();
+
+        for state in states.values_mut() {
+            for (ref_count, cap, op, bt) in state.backtraces.iter_mut() {
+                bt.resolve();
+                let mut stack = String::new();
+                let frames = bt.frames().iter().rev();
+
+                for frame in frames {
+                    let symbols = frame.symbols();
+                    if !symbols.is_empty() {
+                        for symbol in symbols {
+                            if let Some(name) = symbol.name() {
+                                stack.push_str(&name.to_string());
+                                stack.push_str(";")
+                            }
+                        }
+                    } else {
+                        stack.push_str(&format!("{:?};", frame.ip()));
+                    }
+                }
+
+                // unique stack operation, faking as a frame
+                let unique_stack_op = format!("ref_count={},op={:?}", ref_count, op);
+                stacks.push(format!("{stack}; {unique_stack_op} {cap}"));
+            }
+        }
+
+        let mut opts = Options::default();
+        let mut file = File::create(output_file).unwrap();
+        flamegraph::from_lines(&mut opts, stacks.iter().map(|s| s.as_str()), &mut file).unwrap();
+    }
 }
 
 // We need a place to store the JoinHandle to wait for the logging thread to complete when the program ends
@@ -146,22 +180,4 @@ pub fn trace_event(ptr: usize, cap: usize, old_ref_cnt: usize, op: RefOp) {
     GLOBAL_TRACER
         .get_or_init(|| BytesTracer::new().0)
         .record(ptr, cap, old_ref_cnt, op);
-}
-
-#[test]
-fn test_bytes_collector() {
-    let mut buf = String::from_str("hello world").unwrap().into_bytes();
-    // increase capacity to make sure cloning will happen
-    buf.reserve(100);
-    let a = Bytes::from(buf);
-    let b = a.clone();
-
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let states = GLOBAL_TRACER
-        .get_or_init(|| BytesTracer::new().0)
-        .collector
-        .dump_states();
-    dbg!(states);
-    dbg!(b);
 }
