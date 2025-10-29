@@ -36,8 +36,11 @@ pub struct RefCountEvent {
     pub backtrace: Option<Backtrace>,
 }
 
+/// Trace bytes clone/split
+#[derive(Debug)]
 pub struct BytesTracer {
     sender: Arc<Sender<RefCountEvent>>,
+    /// bytes collector
     pub collector: Arc<BytesCollector>,
 }
 
@@ -100,13 +103,16 @@ pub struct PtrState {
     // Other information can also be recorded, such as the thread ID at creation time, etc.
 }
 
+/// Bytes collector, collect pointer states.
+#[derive(Debug)]
 pub struct BytesCollector {
     receiver: crossbeam_channel::Receiver<RefCountEvent>,
+    /// TODO: evict ref_cnt == 0 entries
     ptr_states: Mutex<std::collections::HashMap<usize, PtrState>>,
 }
 
 impl BytesCollector {
-    pub fn handle_event(&self, event: RefCountEvent) {
+    fn handle_event(&self, event: RefCountEvent) {
         let mut states = self.ptr_states.lock().unwrap();
         let state = states.entry(event.ptr).or_insert(PtrState {
             ref_count: 0,
@@ -129,11 +135,13 @@ impl BytesCollector {
         // Additional logic can be added here, such as logging when ref_count reaches zero
     }
 
+    /// dump the pointer states for further inspection
     pub fn dump_states(&self) -> HashMap<usize, PtrState> {
         let states = self.ptr_states.lock().unwrap();
         (*states).clone()
     }
 
+    /// Render flamegraphs to output file
     pub fn render_flamegraph(&self, output_file: &str) {
         let mut states = self.ptr_states.lock().unwrap();
         let mut stacks = Vec::new();
@@ -141,6 +149,9 @@ impl BytesCollector {
         for state in states.values_mut() {
             for (ref_count, cap, op, bt) in state.backtraces.iter_mut() {
                 bt.resolve();
+                if *ref_count == 0 {
+                    continue;
+                }
                 let mut stack = String::new();
                 let frames = bt.frames().iter().rev();
 
@@ -170,8 +181,7 @@ impl BytesCollector {
     }
 }
 
-// We need a place to store the JoinHandle to wait for the logging thread to complete when the program ends
-// But to simplify the API, we can choose to "detach" the thread, letting it exit with the main program
+/// Global bytes tracer to trace where did the clone happen.
 pub static GLOBAL_TRACER: OnceLock<BytesTracer> = OnceLock::new();
 
 // Helper function for easy calling in patched code
