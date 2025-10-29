@@ -83,6 +83,7 @@ mod bytes;
 mod bytes_mut;
 mod fmt;
 mod loom;
+mod trace;
 pub use crate::bytes::Bytes;
 pub use crate::bytes_mut::BytesMut;
 

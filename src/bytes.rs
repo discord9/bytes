@@ -15,6 +15,7 @@ use crate::buf::IntoIter;
 #[allow(unused)]
 use crate::loom::sync::atomic::AtomicMut;
 use crate::loom::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use crate::trace::{trace_event, RefOp};
 use crate::{Buf, BytesMut};
 
 /// A cheaply cloneable and sliceable chunk of contiguous memory.
@@ -1475,6 +1476,8 @@ unsafe fn shared_drop(data: &mut AtomicPtr<()>, _ptr: *const u8, _len: usize) {
 
 unsafe fn shallow_clone_arc(shared: *mut Shared, ptr: *const u8, len: usize) -> Bytes {
     let old_size = (*shared).ref_cnt.fetch_add(1, Ordering::Relaxed);
+
+    trace_event(shared as usize, (*shared).cap, old_size, RefOp::Inc);
 
     if old_size > usize::MAX >> 1 {
         crate::abort();
