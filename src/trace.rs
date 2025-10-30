@@ -54,7 +54,8 @@ pub struct BytesTracer {
 }
 
 impl BytesTracer {
-    fn new() -> (Self, thread::JoinHandle<()>) {
+    /// Create a new BytesTracer and start the logging thread
+    pub fn new() -> (Self, thread::JoinHandle<()>) {
         // Create an unbounded channel
         let (sender, receiver) = unbounded::<RefCountEvent>();
         let collector = Arc::new(BytesCollector {
