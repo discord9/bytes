@@ -194,7 +194,7 @@ impl BytesCollector {
     }
 
     /// Render flamegraphs to output bytes
-    pub fn render_flamegraph(&self) -> Vec<u8> {
+    pub fn render_flamegraph(&self) -> std::io::Result<Vec<u8>> {
         self.clear_outdated();
         let states = {
             let tmp = self.ptr_states.lock().unwrap().clone();
@@ -237,8 +237,8 @@ impl BytesCollector {
 
         let mut opts = Options::default();
         let mut bytes = Vec::new();
-        flamegraph::from_lines(&mut opts, stacks.iter().map(|s| s.as_str()), &mut bytes).unwrap();
-        bytes
+        flamegraph::from_lines(&mut opts, stacks.iter().map(|s| s.as_str()), &mut bytes)?;
+        Ok(bytes)
     }
 }
 
