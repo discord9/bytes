@@ -1570,7 +1570,10 @@ unsafe fn shallow_clone_vec(
 
 unsafe fn release_shared(ptr: *mut Shared) {
     // `Shared` storage... follow the drop steps from Arc.
-    if (*ptr).ref_cnt.fetch_sub(1, Ordering::Release) != 1 {
+    let old_cnt = (*ptr).ref_cnt.fetch_sub(1, Ordering::Release);
+
+    trace_event(ptr as usize, (*ptr).cap, old_cnt, RefOp::Dec);
+    if old_cnt != 1 {
         return;
     }
 

@@ -5,7 +5,7 @@ use inferno::flamegraph::{self, Options};
 use std::{
     collections::HashMap,
     format,
-    string::{String, ToString as _},
+    string::String,
     sync::{Arc, Mutex, OnceLock},
     thread::{self, JoinHandle},
     time::Duration,
@@ -146,7 +146,8 @@ impl BytesCollector {
     fn handle_event(&self, event: RefCountEvent) {
         let mut states = self.ptr_states.lock().unwrap();
         let state = states.entry(event.ptr).or_insert(PtrState {
-            ref_count: 0,
+            // initialize ref count from the first event
+            ref_count: event.old_ref_cnt as i64,
             backtraces: Vec::new(),
             last_updated_at: self.clock.now(),
         });
@@ -168,6 +169,7 @@ impl BytesCollector {
 
     /// dump the pointer states for further inspection
     pub fn dump_states(&self) -> HashMap<usize, PtrState> {
+        self.clear_outdated();
         let states = self.ptr_states.lock().unwrap();
         (*states).clone()
     }
@@ -178,13 +180,10 @@ impl BytesCollector {
         let mut to_be_deleted = Vec::new();
         for (ptr, state) in states.iter_mut() {
             if state.ref_count == 0 {
-                if state.last_updated_at.elapsed().as_secs() > 60 {
+                if state.last_updated_at.elapsed().as_secs() > 3 {
                     to_be_deleted.push(*ptr);
                 }
                 continue;
-            }
-            for (_, _, _, bt) in state.backtraces.iter_mut() {
-                bt.resolve();
             }
         }
 
@@ -206,6 +205,8 @@ impl BytesCollector {
         for state in states.values() {
             for (ref ref_count, ref cap, ref op, bt) in &state.backtraces {
                 let mut stack = String::new();
+                let mut bt = bt.clone();
+                bt.resolve();
                 let frames = bt.frames().iter().rev();
 
                 for frame in frames {
@@ -213,8 +214,9 @@ impl BytesCollector {
                     if !symbols.is_empty() {
                         for symbol in symbols {
                             if let Some(name) = symbol.name() {
-                                stack.push_str(&name.to_string());
-                                stack.push_str(";")
+                                let lineno = symbol.lineno().unwrap_or(0);
+                                let colno = symbol.colno().unwrap_or(0);
+                                stack.push_str(&format!("{}:{}:{};", name, lineno, colno));
                             }
                         }
                     } else {
@@ -231,8 +233,12 @@ impl BytesCollector {
                         RefOp::Dec => *ref_count - 1,
                     }
                 );
-                stacks.push(format!("{stack}; {unique_stack_op} {cap}"));
+                stacks.push(format!("{stack} {unique_stack_op} {cap}"));
             }
+        }
+
+        if stacks.is_empty() {
+            return Ok(r#"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="100"><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-size="24" fill="red">no bytes trace data found</text></svg>"#.as_bytes().to_vec());
         }
 
         let mut opts = Options::default();
@@ -251,4 +257,58 @@ pub fn trace_event(ptr: usize, cap: usize, old_ref_cnt: usize, op: RefOp) {
     GLOBAL_TRACER
         .get_or_init(|| BytesTracer::new().0)
         .record(ptr, cap, old_ref_cnt, op);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Bytes;
+    use std::fs::File;
+    use std::io::Write;
+
+    #[test]
+    fn trace_and_render_flamegraph() {
+        let (tracer, _handle) = BytesTracer::new();
+        let collector = tracer.collector.clone();
+        let _ = GLOBAL_TRACER.set(tracer);
+
+        let mut v = Vec::new();
+
+        for _ in 0..100_0000 {
+            let mut buf = String::from("deaddeef").into_bytes();
+            buf.reserve(1000);
+            let b = Bytes::from(buf);
+            v.push(b.clone());
+            v.push(b.clone());
+            v.push(b.clone());
+            v.push(b);
+        }
+
+        // give some time for the collector to process events
+        thread::sleep(Duration::from_millis(100));
+        std::dbg!(collector.dump_states().len());
+
+        let flamegraph_bytes = collector.render_flamegraph().unwrap();
+        let mut file = File::create("flamegraph_after_clone.svg").unwrap();
+        file.write_all(&flamegraph_bytes).unwrap();
+        let mut i = 0;
+        v.retain(|_| {
+            i += 1;
+            i % 4 == 0
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        std::dbg!(collector.dump_states().len());
+        let flamegraph_bytes = collector.render_flamegraph().unwrap();
+        let mut file = File::create("flamegraph_after_dec.svg").unwrap();
+        file.write_all(&flamegraph_bytes).unwrap();
+
+        drop(v);
+
+        thread::sleep(Duration::from_secs(6));
+        std::dbg!(collector.dump_states().len());
+        let flamegraph_bytes = collector.render_flamegraph().unwrap();
+        let mut file = File::create("flamegraph_after_drop.svg").unwrap();
+        file.write_all(&flamegraph_bytes).unwrap();
+    }
 }
