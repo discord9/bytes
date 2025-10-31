@@ -4,16 +4,25 @@ use crossbeam_channel::{unbounded, RecvTimeoutError, Sender};
 use inferno::flamegraph::{self, Options};
 use std::{
     collections::HashMap,
-    format,
-    string::String,
+    env, format,
+    string::{String, ToString as _},
     sync::{Arc, Mutex, OnceLock},
     thread::{self, JoinHandle},
     time::Duration,
     vec::Vec,
 };
 
-/// Only sample when address % 997 == 0
-const SAMPLE_FACTOR: usize = 997;
+/// Only sample when address % sample_factor == 0
+static SAMPLE_FACTOR: OnceLock<usize> = OnceLock::new();
+
+fn sample_factor() -> usize {
+    *SAMPLE_FACTOR.get_or_init(|| {
+        env::var("BYTES_SAMPLE_FACTOR")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(997)
+    })
+}
 /// Defines the operation type
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum RefOp {
@@ -79,7 +88,7 @@ impl BytesTracer {
     /// Use #[inline] to hint the compiler to inline, reducing function call overhead
     #[inline]
     pub fn record(&self, ptr: usize, cap: usize, old_ref_cnt: usize, op: RefOp) {
-        if ptr % SAMPLE_FACTOR != 0 {
+        if ptr % sample_factor() != 0 {
             return;
         }
         // Getting thread ID and timestamp is a very fast operation
@@ -233,7 +242,8 @@ impl BytesCollector {
                         RefOp::Dec => *ref_count - 1,
                     }
                 );
-                stacks.push(format!("{stack} {unique_stack_op} {cap}"));
+                let real_cap = cap * sample_factor();
+                stacks.push(format!("{stack} {unique_stack_op} {real_cap}"));
             }
         }
 
@@ -242,6 +252,8 @@ impl BytesCollector {
         }
 
         let mut opts = Options::default();
+        opts.title = "inuse space(estimated)&op by Bytes/BytesMut".to_string();
+        opts.count_name = "bytes".to_string();
         let mut bytes = Vec::new();
         flamegraph::from_lines(&mut opts, stacks.iter().map(|s| s.as_str()), &mut bytes)?;
         Ok(bytes)
@@ -274,9 +286,9 @@ mod tests {
 
         let mut v = Vec::new();
 
-        for _ in 0..100_0000 {
+        for _ in 0..1_000_000 {
             let mut buf = String::from("deaddeef").into_bytes();
-            buf.reserve(1000);
+            buf.reserve(1000 - buf.len());
             let b = Bytes::from(buf);
             v.push(b.clone());
             v.push(b.clone());
