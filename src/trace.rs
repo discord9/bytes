@@ -26,6 +26,8 @@ fn sample_factor() -> usize {
 /// Defines the operation type
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum RefOp {
+    /// Create a new reference (allocation)
+    Init,
     /// Increment reference (clone)
     Inc,
     /// Decrement reference (drop)
@@ -37,6 +39,7 @@ impl Display for RefOp {
         match self {
             RefOp::Inc => write!(f, "+"),
             RefOp::Dec => write!(f, "-"),
+            RefOp::Init => write!(f, "init"),
         }
     }
 }
@@ -60,6 +63,8 @@ pub struct BytesTracer {
     sender: Arc<Sender<RefCountEvent>>,
     /// bytes collector
     pub collector: Arc<BytesCollector>,
+    /// Maybe change to sample every X MB memory?
+    ptr_count: Mutex<usize>,
 }
 
 impl BytesTracer {
@@ -70,6 +75,7 @@ impl BytesTracer {
         let collector = Arc::new(BytesCollector {
             receiver,
             ptr_states: Mutex::new(HashMap::new()),
+            ptr_trace: papaya::HashSet::new(),
             clock: quanta::Clock::new(),
         });
         let inner = collector.clone();
@@ -79,6 +85,7 @@ impl BytesTracer {
             BytesTracer {
                 sender: Arc::new(sender),
                 collector,
+                ptr_count: Mutex::new(0),
             },
             handle,
         )
@@ -88,9 +95,28 @@ impl BytesTracer {
     /// Use #[inline] to hint the compiler to inline, reducing function call overhead
     #[inline]
     pub fn record(&self, ptr: usize, cap: usize, old_ref_cnt: usize, op: RefOp) {
-        if ptr % sample_factor() != 0 {
-            return;
+        // FIXME: need a immediate check for ptr is traced
+        if self.collector.ptr_trace.pin().contains(&ptr) {
+            // fall through
+        } else {
+            if op != RefOp::Init {
+                // only trace newly allocated pointers
+                return;
+            }
+            // only trace every `sample_factor` allocations
+            let count = {
+                let mut count = self.ptr_count.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            // new unsampled pointer should only be sampled based on sample factor
+            // and is newly allocated (ref count == 1)
+            if count % sample_factor() != 0 {
+                return;
+            }
+            self.collector.ptr_trace.pin().insert(ptr);
         }
+
         // Getting thread ID and timestamp is a very fast operation
         let event = RefCountEvent {
             ptr,
@@ -123,6 +149,7 @@ pub struct BytesCollector {
     receiver: crossbeam_channel::Receiver<RefCountEvent>,
     /// TODO: evict ref_cnt == 0 entries
     ptr_states: Mutex<std::collections::HashMap<usize, PtrState>>,
+    ptr_trace: papaya::HashSet<usize>,
     clock: quanta::Clock,
 }
 
@@ -165,6 +192,7 @@ impl BytesCollector {
         match event.op {
             RefOp::Inc => state.ref_count += 1,
             RefOp::Dec => state.ref_count -= 1,
+            RefOp::Init => (),
         }
 
         if let Some(bt) = event.backtrace {
@@ -196,8 +224,10 @@ impl BytesCollector {
             }
         }
 
-        for ptr in to_be_deleted {
-            states.remove(&ptr);
+        let traces = self.ptr_trace.pin();
+        for ptr in &to_be_deleted {
+            states.remove(ptr);
+            traces.remove(ptr);
         }
     }
 
@@ -234,14 +264,11 @@ impl BytesCollector {
                 }
 
                 // unique stack operation, faking as a frame
-                let unique_stack_op = format!(
-                    "ref_count={}=>{}",
-                    ref_count,
-                    match op {
-                        RefOp::Inc => *ref_count + 1,
-                        RefOp::Dec => *ref_count - 1,
-                    }
-                );
+                let unique_stack_op = match op {
+                    RefOp::Inc => format!("rc={}=>{}", ref_count, *ref_count + 1),
+                    RefOp::Dec => format!("rc={}=>{}", ref_count, *ref_count - 1),
+                    RefOp::Init => format!("rc={}", ref_count),
+                };
                 let real_cap = cap * sample_factor();
                 stacks.push(format!("{stack} {unique_stack_op} {real_cap}"));
             }
@@ -288,7 +315,7 @@ mod tests {
 
         for _ in 0..1_000_000 {
             let mut buf = String::from("deaddeef").into_bytes();
-            buf.reserve(1000 - buf.len());
+            buf.reserve(1000);
             let b = Bytes::from(buf);
             v.push(b.clone());
             v.push(b.clone());
@@ -318,7 +345,17 @@ mod tests {
         drop(v);
 
         thread::sleep(Duration::from_secs(6));
+        GLOBAL_TRACER.get().unwrap().collector.clear_outdated();
         std::dbg!(collector.dump_states().len());
+        // calc ref cnt distribution, calc how many pointers are at each ref count
+        std::dbg!(collector
+            .dump_states()
+            .iter()
+            .map(|(_, v)| v.ref_count)
+            .fold(HashMap::new(), |mut acc, ref_count| {
+                *acc.entry(ref_count).or_insert(0) += 1;
+                acc
+            }));
         let flamegraph_bytes = collector.render_flamegraph().unwrap();
         let mut file = File::create("flamegraph_after_drop.svg").unwrap();
         file.write_all(&flamegraph_bytes).unwrap();

@@ -1039,6 +1039,13 @@ impl BytesMut {
             ref_count: AtomicUsize::new(ref_cnt),
         });
 
+        trace_event(
+            self.ptr.as_ptr() as usize,
+            original_capacity_repr,
+            ref_cnt,
+            crate::trace::RefOp::Init,
+        );
+
         let shared = Box::into_raw(shared);
 
         // The pointer should be aligned, so this assert should

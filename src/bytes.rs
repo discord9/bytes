@@ -980,6 +980,8 @@ impl From<Vec<u8>> for Bytes {
             ref_cnt: AtomicUsize::new(1),
         });
 
+        trace_event(ptr as usize, cap, 1, RefOp::Init);
+
         let shared = Box::into_raw(shared);
         // The pointer should be aligned, so this assert should
         // always succeed.
@@ -1482,7 +1484,7 @@ unsafe fn shared_drop(data: &mut AtomicPtr<()>, _ptr: *const u8, _len: usize) {
 unsafe fn shallow_clone_arc(shared: *mut Shared, ptr: *const u8, len: usize) -> Bytes {
     let old_size = (*shared).ref_cnt.fetch_add(1, Ordering::Relaxed);
 
-    trace_event(shared as usize, (*shared).cap, old_size, RefOp::Inc);
+    trace_event(ptr as usize, (*shared).cap, old_size, RefOp::Inc);
 
     if old_size > usize::MAX >> 1 {
         crate::abort();
@@ -1523,6 +1525,8 @@ unsafe fn shallow_clone_vec(
         // `shallow_clone`.
         ref_cnt: AtomicUsize::new(2),
     });
+
+    trace_event(ptr as usize, shared.cap, 2, RefOp::Init);
 
     let shared = Box::into_raw(shared);
 
@@ -1572,7 +1576,7 @@ unsafe fn release_shared(ptr: *mut Shared) {
     // `Shared` storage... follow the drop steps from Arc.
     let old_cnt = (*ptr).ref_cnt.fetch_sub(1, Ordering::Release);
 
-    trace_event(ptr as usize, (*ptr).cap, old_cnt, RefOp::Dec);
+    trace_event((*ptr).buf as usize, (*ptr).cap, old_cnt, RefOp::Dec);
     if old_cnt != 1 {
         return;
     }

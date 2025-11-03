@@ -33,6 +33,7 @@ backtrace = "0.3"
 crossbeam-channel = "*"
 inferno = { version = "0.12"}
 quanta = "*"
+papaya = "0.2.3"
 
 [dev-dependencies]
 futures = "0.3"
