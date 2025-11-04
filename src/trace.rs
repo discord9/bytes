@@ -216,7 +216,13 @@ impl BytesCollector {
 
         let mut to_be_deleted = Vec::new();
         for (ptr, state) in states.iter_mut() {
-            if state.ref_count == 0 {
+            if state.ref_count == 0
+                || state
+                    .backtraces
+                    .iter()
+                    .any(|(ref_count, _, ref_op, _)| *ref_count == 1 && *ref_op == RefOp::Dec)
+            // have drop operation(consider if out of order recv might cause false positive?)
+            {
                 if state.last_updated_at.elapsed().as_secs() > 3 {
                     to_be_deleted.push(*ptr);
                 }
@@ -239,40 +245,15 @@ impl BytesCollector {
             tmp
         };
 
-        let mut stacks = Vec::new();
+        let mut aggregated_stacks = AggregatedStacks::new();
 
         for state in states.values() {
             for (ref ref_count, ref cap, ref op, bt) in &state.backtraces {
-                let mut stack = String::new();
-                let mut bt = bt.clone();
-                bt.resolve();
-                let frames = bt.frames().iter().rev();
-
-                for frame in frames {
-                    let symbols = frame.symbols();
-                    if !symbols.is_empty() {
-                        for symbol in symbols {
-                            if let Some(name) = symbol.name() {
-                                let lineno = symbol.lineno().unwrap_or(0);
-                                let colno = symbol.colno().unwrap_or(0);
-                                stack.push_str(&format!("{}:{}:{};", name, lineno, colno));
-                            }
-                        }
-                    } else {
-                        stack.push_str(&format!("{:?};", frame.ip()));
-                    }
-                }
-
-                // unique stack operation, faking as a frame
-                let unique_stack_op = match op {
-                    RefOp::Inc => format!("rc={}=>{}", ref_count, *ref_count + 1),
-                    RefOp::Dec => format!("rc={}=>{}", ref_count, *ref_count - 1),
-                    RefOp::Init => format!("rc={}", ref_count),
-                };
-                let real_cap = cap * sample_factor();
-                stacks.push(format!("{stack} {unique_stack_op} {real_cap}"));
+                aggregated_stacks.add_event(bt, *ref_count, *op, *cap);
             }
         }
+
+        let stacks = aggregated_stacks.render();
 
         if stacks.is_empty() {
             return Ok(r#"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="100"><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-size="24" fill="red">no bytes trace data found</text></svg>"#.as_bytes().to_vec());
@@ -284,6 +265,73 @@ impl BytesCollector {
         let mut bytes = Vec::new();
         flamegraph::from_lines(&mut opts, stacks.iter().map(|s| s.as_str()), &mut bytes)?;
         Ok(bytes)
+    }
+}
+
+struct AggregatedStacks {
+    // key: backtrace_ips
+    // value: resolved_stack_string
+    resolved_backtraces: HashMap<Vec<usize>, String>,
+    // key: (backtrace_ips, (ref_count, op))
+    // value: aggregated_cap
+    aggregated_caps: HashMap<(Vec<usize>, (usize, RefOp)), usize>,
+}
+
+impl AggregatedStacks {
+    fn new() -> Self {
+        Self {
+            resolved_backtraces: HashMap::new(),
+            aggregated_caps: HashMap::new(),
+        }
+    }
+
+    fn add_event(&mut self, bt: &Backtrace, ref_count: usize, op: RefOp, cap: usize) {
+        let key_ips = bt.frames().iter().map(|f| f.ip() as usize).collect::<Vec<_>>();
+
+        self.resolved_backtraces.entry(key_ips.clone()).or_insert_with(|| {
+            let mut stack = String::new();
+            let mut bt = bt.clone();
+            bt.resolve();
+            let frames = bt.frames().iter().rev();
+
+            for frame in frames {
+                let symbols = frame.symbols();
+                if !symbols.is_empty() {
+                    for symbol in symbols {
+                        if let Some(name) = symbol.name() {
+                            let lineno = symbol.lineno().unwrap_or(0);
+                            let colno = symbol.colno().unwrap_or(0);
+                            stack.push_str(&format!("{}:{}:{};", name, lineno, colno));
+                        }
+                    }
+                } else {
+                    stack.push_str(&format!("{:?};", frame.ip()));
+                }
+            }
+            stack
+        });
+
+        let real_cap = cap * sample_factor();
+
+        *self
+            .aggregated_caps
+            .entry((key_ips, (ref_count, op)))
+            .or_insert(0) += real_cap;
+    }
+
+    fn render(self) -> Vec<String> {
+        self.aggregated_caps
+            .into_iter()
+            .map(|((ips, (ref_count, op)), aggregated_cap)| {
+                let stack = self.resolved_backtraces.get(&ips).unwrap();
+                let unique_stack_op = match op {
+                    RefOp::Inc => format!("rc={}=>{}", ref_count, ref_count + 1),
+                    RefOp::Dec => format!("rc={}=>{}", ref_count, ref_count - 1),
+                    RefOp::Init => format!("rc={}", ref_count),
+                };
+                format!("{stack} {unique_stack_op} {aggregated_cap}")
+            })
+            .collect()
     }
 }
 
