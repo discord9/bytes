@@ -1463,7 +1463,7 @@ unsafe fn release_shared(ptr: *mut Shared) {
         ptr as usize,
         (*ptr).original_capacity_repr,
         old_cnt,
-        crate::trace::RefOp::Inc,
+        crate::trace::RefOp::Dec,
     );
     if old_cnt != 1 {
         return;
